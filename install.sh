@@ -13,6 +13,38 @@ fi
 
 echo "✓ Python 3 trouvé: $(python3 --version)"
 
+# Check for Qt system libraries
+echo ""
+echo "Vérification des bibliothèques Qt système..."
+
+MISSING_LIBS=()
+
+# Check for xcb-cursor (required for Qt)
+if ! ldconfig -p | grep -q libxcb-cursor.so; then
+    MISSING_LIBS+=("libxcb-cursor0")
+fi
+
+if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
+    echo "⚠️  Bibliothèques Qt manquantes détectées."
+    echo ""
+    echo "Pour installer les dépendances Qt nécessaires:"
+    echo "  sudo apt install libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxkbcommon-x11-0"
+    echo ""
+    read -p "Voulez-vous installer ces dépendances maintenant ? (y/N) " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        sudo apt install -y libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxkbcommon-x11-0
+        if [ $? -eq 0 ]; then
+            echo "✓ Bibliothèques Qt installées"
+        else
+            echo "❌ Erreur lors de l'installation des bibliothèques Qt"
+            echo "Vous devrez les installer manuellement pour que l'application fonctionne."
+        fi
+    fi
+else
+    echo "✓ Bibliothèques Qt trouvées"
+fi
+
 # Check for ffmpeg
 if ! command -v ffmpeg &> /dev/null; then
     echo ""
