@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Video Organizer
+Comment=Organize AI-generated videos with tags
+Exec=/home/user/aishahLora/video_organizer.py
+Path=/home/user/aishahLora
+Icon=folder-videos
+Terminal=false
+Categories=Utility;Video;
+Keywords=video;organizer;tags;
