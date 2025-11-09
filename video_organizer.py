@@ -16,10 +16,12 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QScrollArea, QGridLayout, QFileDialog,
     QDialog, QLineEdit, QListWidget, QMessageBox, QFrame, QCheckBox,
-    QSizePolicy
+    QSizePolicy, QProgressBar
 )
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QObject, QThreadPool, QRunnable, pyqtSlot
 from PyQt6.QtGui import QPixmap, QImage
+from queue import Queue
+import threading
 
 
 class Config:
@@ -94,38 +96,47 @@ class Config:
         return False
 
 
-class ThumbnailGenerator(QThread):
-    """Generate video thumbnails in background"""
+class ThumbnailWorkerSignals(QObject):
+    """Signals for thumbnail worker"""
+    finished = pyqtSignal(str, str)  # video_path, thumbnail_path
+    progress = pyqtSignal(int)  # progress count
 
-    thumbnail_ready = pyqtSignal(str, str)  # video_path, thumbnail_path
+
+class ThumbnailWorker(QRunnable):
+    """Worker for generating thumbnails"""
 
     def __init__(self, video_path: str, thumbnail_path: str):
         super().__init__()
         self.video_path = video_path
         self.thumbnail_path = thumbnail_path
+        self.signals = ThumbnailWorkerSignals()
 
+    @pyqtSlot()
     def run(self):
         """Generate thumbnail using ffmpeg"""
         try:
             # Create thumbnail directory if it doesn't exist
             os.makedirs(os.path.dirname(self.thumbnail_path), exist_ok=True)
 
-            # Use ffmpeg to extract frame at 1 second
+            # Use ffmpeg to extract frame at 0.5 second (or first frame if video is too short)
             cmd = [
                 'ffmpeg',
                 '-i', self.video_path,
-                '-ss', '00:00:01',
+                '-ss', '00:00:00.5',
                 '-vframes', '1',
                 '-vf', 'scale=320:180:force_original_aspect_ratio=decrease',
+                '-loglevel', 'quiet',
                 '-y',
                 self.thumbnail_path
             ]
 
             subprocess.run(cmd, capture_output=True, check=True)
-            self.thumbnail_ready.emit(self.video_path, self.thumbnail_path)
+            self.signals.finished.emit(self.video_path, self.thumbnail_path)
         except Exception as e:
             print(f"Error generating thumbnail for {self.video_path}: {e}")
-            self.thumbnail_ready.emit(self.video_path, "")
+            self.signals.finished.emit(self.video_path, "")
+        finally:
+            self.signals.progress.emit(1)
 
 
 class VideoCard(QFrame):
@@ -217,18 +228,9 @@ class VideoCard(QFrame):
         cache = self.config.data.get("thumbnail_cache", {})
         if self.video_path in cache and os.path.exists(cache[self.video_path]):
             self.set_thumbnail(cache[self.video_path])
-            return
+            return True  # Already cached
 
-        # Generate new thumbnail
-        thumbnail_dir = os.path.expanduser("~/.cache/video_organizer/thumbnails")
-        os.makedirs(thumbnail_dir, exist_ok=True)
-
-        video_hash = str(hash(self.video_path))
-        thumbnail_path = os.path.join(thumbnail_dir, f"{video_hash}.jpg")
-
-        self.thumbnail_thread = ThumbnailGenerator(self.video_path, thumbnail_path)
-        self.thumbnail_thread.thumbnail_ready.connect(self.on_thumbnail_ready)
-        self.thumbnail_thread.start()
+        return False  # Needs generation
 
     def on_thumbnail_ready(self, video_path: str, thumbnail_path: str):
         """Callback when thumbnail is ready"""
@@ -396,6 +398,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = Config()
         self.video_cards = []
+        self.thumbnail_pool = QThreadPool()
+        self.thumbnail_pool.setMaxThreadCount(5)  # Limit to 5 concurrent thumbnail generations
+        self.thumbnails_generated = 0
+        self.total_thumbnails = 0
 
         self.setWindowTitle("Video Organizer")
         self.setMinimumSize(1200, 800)
@@ -439,6 +445,22 @@ class MainWindow(QMainWindow):
         self.folders_label = QLabel()
         self.update_folders_label()
         main_layout.addWidget(self.folders_label)
+
+        # Progress bar for thumbnail generation
+        self.progress_widget = QWidget()
+        progress_layout = QHBoxLayout(self.progress_widget)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.progress_label = QLabel("Miniatures: 0/0")
+        progress_layout.addWidget(self.progress_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        progress_layout.addWidget(self.progress_bar)
+
+        self.progress_widget.setVisible(False)
+        main_layout.addWidget(self.progress_widget)
 
         # Scroll area for video grid
         scroll_area = QScrollArea()
@@ -520,8 +542,17 @@ class MainWindow(QMainWindow):
         # Sort by modification time (newest first)
         videos.sort(key=lambda x: x[1], reverse=True)
 
+        if not videos:
+            label = QLabel("Aucune vidéo trouvée. Sélectionnez un dossier source.")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet("font-size: 16px; color: gray;")
+            self.grid_layout.addWidget(label, 0, 0, 1, 3)
+            return
+
         # Create video cards in grid
         columns = 3
+        thumbnails_to_generate = []
+
         for idx, (video_path, _) in enumerate(videos):
             row = idx // columns
             col = idx % columns
@@ -530,11 +561,45 @@ class MainWindow(QMainWindow):
             self.grid_layout.addWidget(card, row, col)
             self.video_cards.append(card)
 
-        if not videos:
-            label = QLabel("Aucune vidéo trouvée. Sélectionnez un dossier source.")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setStyleSheet("font-size: 16px; color: gray;")
-            self.grid_layout.addWidget(label, 0, 0, 1, columns)
+            # Check if thumbnail needs generation
+            if not card.generate_thumbnail():
+                thumbnails_to_generate.append((card, video_path))
+
+        # Generate thumbnails with thread pool
+        if thumbnails_to_generate:
+            self.total_thumbnails = len(thumbnails_to_generate)
+            self.thumbnails_generated = 0
+            self.progress_widget.setVisible(True)
+            self.update_progress()
+
+            thumbnail_dir = os.path.expanduser("~/.cache/video_organizer/thumbnails")
+            os.makedirs(thumbnail_dir, exist_ok=True)
+
+            for card, video_path in thumbnails_to_generate:
+                video_hash = str(hash(video_path))
+                thumbnail_path = os.path.join(thumbnail_dir, f"{video_hash}.jpg")
+
+                worker = ThumbnailWorker(video_path, thumbnail_path)
+                worker.signals.finished.connect(card.on_thumbnail_ready)
+                worker.signals.progress.connect(self.on_thumbnail_progress)
+
+                self.thumbnail_pool.start(worker)
+
+    def on_thumbnail_progress(self, count):
+        """Update progress when a thumbnail is generated"""
+        self.thumbnails_generated += count
+        self.update_progress()
+
+        if self.thumbnails_generated >= self.total_thumbnails:
+            # All thumbnails generated
+            self.progress_widget.setVisible(False)
+
+    def update_progress(self):
+        """Update progress bar and label"""
+        self.progress_label.setText(f"Miniatures: {self.thumbnails_generated}/{self.total_thumbnails}")
+        if self.total_thumbnails > 0:
+            percentage = int((self.thumbnails_generated / self.total_thumbnails) * 100)
+            self.progress_bar.setValue(percentage)
 
 
 def main():
