@@ -232,17 +232,29 @@ class VideoCard(QFrame):
         """Generate and display thumbnail"""
         # Check cache first
         cache = self.config.data.get("thumbnail_cache", {})
+        cached_path = cache.get(self.video_path)
+
+        print(f"🔍 Checking cache for: {os.path.basename(self.video_path)}")
+        print(f"    Cached path: {cached_path}")
+        print(f"    Path exists: {os.path.exists(cached_path) if cached_path else False}")
+
         if self.video_path in cache and os.path.exists(cache[self.video_path]):
+            print(f"  ✓ Using cached thumbnail for: {os.path.basename(self.video_path)}")
             self.set_thumbnail(cache[self.video_path])
             return True  # Already cached
 
+        print(f"  ⚠ Needs generation for: {os.path.basename(self.video_path)}")
         return False  # Needs generation
 
     def on_thumbnail_ready(self, video_path: str, thumbnail_path: str):
         """Callback when thumbnail is ready"""
+        print(f"📥 Thumbnail ready callback for: {os.path.basename(video_path)}")
+        print(f"    This card video: {os.path.basename(self.video_path)}")
+        print(f"    Paths match: {video_path == self.video_path}")
+
         if video_path == self.video_path:
             if thumbnail_path and os.path.exists(thumbnail_path):
-                print(f"→ Setting thumbnail for: {os.path.basename(video_path)}")
+                print(f"  → Setting thumbnail from worker for: {os.path.basename(video_path)}")
                 # Update cache
                 if "thumbnail_cache" not in self.config.data:
                     self.config.data["thumbnail_cache"] = {}
@@ -251,19 +263,34 @@ class VideoCard(QFrame):
 
                 self.set_thumbnail(thumbnail_path)
             else:
-                print(f"→ Thumbnail path invalid or doesn't exist: {thumbnail_path}")
+                print(f"  ✗ Thumbnail path invalid or doesn't exist: {thumbnail_path}")
                 self.thumbnail_label.setText("Erreur")
 
     def set_thumbnail(self, thumbnail_path: str):
         """Set the thumbnail image"""
+        print(f"  → Attempting to load thumbnail: {thumbnail_path}")
+        print(f"    File exists: {os.path.exists(thumbnail_path)}")
+
         pixmap = QPixmap(thumbnail_path)
+        print(f"    Pixmap loaded: {not pixmap.isNull()}, Size: {pixmap.width()}x{pixmap.height()}")
+
         if not pixmap.isNull():
+            # Clear any existing text first
+            self.thumbnail_label.clear()
+
             scaled_pixmap = pixmap.scaled(
                 320, 180,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
+            print(f"    Scaled to: {scaled_pixmap.width()}x{scaled_pixmap.height()}")
+
             self.thumbnail_label.setPixmap(scaled_pixmap)
+
+            # Force GUI update
+            self.thumbnail_label.update()
+            self.thumbnail_label.repaint()
+
             print(f"  ✓ Thumbnail displayed: {os.path.basename(self.video_path)}")
         else:
             self.thumbnail_label.setText("Erreur")
@@ -598,8 +625,9 @@ class MainWindow(QMainWindow):
                 thumbnail_path = os.path.join(thumbnail_dir, f"{video_hash}.jpg")
 
                 worker = ThumbnailWorker(video_path, thumbnail_path)
-                worker.signals.finished.connect(card.on_thumbnail_ready)
-                worker.signals.progress.connect(self.on_thumbnail_progress)
+                # Use QueuedConnection to ensure GUI updates happen on main thread
+                worker.signals.finished.connect(card.on_thumbnail_ready, Qt.ConnectionType.QueuedConnection)
+                worker.signals.progress.connect(self.on_thumbnail_progress, Qt.ConnectionType.QueuedConnection)
 
                 self.thumbnail_pool.start(worker)
         else:
