@@ -125,15 +125,21 @@ class ThumbnailWorker(QRunnable):
                 '-ss', '00:00:00.5',
                 '-vframes', '1',
                 '-vf', 'scale=320:180:force_original_aspect_ratio=decrease',
-                '-loglevel', 'quiet',
                 '-y',
                 self.thumbnail_path
             ]
 
-            subprocess.run(cmd, capture_output=True, check=True)
-            self.signals.finished.emit(self.video_path, self.thumbnail_path)
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0 and os.path.exists(self.thumbnail_path):
+                print(f"✓ Thumbnail generated: {os.path.basename(self.video_path)}")
+                self.signals.finished.emit(self.video_path, self.thumbnail_path)
+            else:
+                print(f"✗ Failed to generate thumbnail for: {os.path.basename(self.video_path)}")
+                print(f"  Error: {result.stderr[:200]}")  # First 200 chars of error
+                self.signals.finished.emit(self.video_path, "")
         except Exception as e:
-            print(f"Error generating thumbnail for {self.video_path}: {e}")
+            print(f"✗ Exception generating thumbnail for {os.path.basename(self.video_path)}: {e}")
             self.signals.finished.emit(self.video_path, "")
         finally:
             self.signals.progress.emit(1)
@@ -234,14 +240,19 @@ class VideoCard(QFrame):
 
     def on_thumbnail_ready(self, video_path: str, thumbnail_path: str):
         """Callback when thumbnail is ready"""
-        if video_path == self.video_path and thumbnail_path and os.path.exists(thumbnail_path):
-            # Update cache
-            if "thumbnail_cache" not in self.config.data:
-                self.config.data["thumbnail_cache"] = {}
-            self.config.data["thumbnail_cache"][video_path] = thumbnail_path
-            self.config.save()
+        if video_path == self.video_path:
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                print(f"→ Setting thumbnail for: {os.path.basename(video_path)}")
+                # Update cache
+                if "thumbnail_cache" not in self.config.data:
+                    self.config.data["thumbnail_cache"] = {}
+                self.config.data["thumbnail_cache"][video_path] = thumbnail_path
+                self.config.save()
 
-            self.set_thumbnail(thumbnail_path)
+                self.set_thumbnail(thumbnail_path)
+            else:
+                print(f"→ Thumbnail path invalid or doesn't exist: {thumbnail_path}")
+                self.thumbnail_label.setText("Erreur")
 
     def set_thumbnail(self, thumbnail_path: str):
         """Set the thumbnail image"""
@@ -253,8 +264,10 @@ class VideoCard(QFrame):
                 Qt.TransformationMode.SmoothTransformation
             )
             self.thumbnail_label.setPixmap(scaled_pixmap)
+            print(f"  ✓ Thumbnail displayed: {os.path.basename(self.video_path)}")
         else:
             self.thumbnail_label.setText("Erreur")
+            print(f"  ✗ Failed to load pixmap from: {thumbnail_path}")
 
     def on_tag_changed(self):
         """Handle tag checkbox state change"""
@@ -572,6 +585,11 @@ class MainWindow(QMainWindow):
             self.progress_widget.setVisible(True)
             self.update_progress()
 
+            print(f"\n📊 Total videos: {len(videos)}")
+            print(f"📊 Cached thumbnails: {len(videos) - len(thumbnails_to_generate)}")
+            print(f"📊 Thumbnails to generate: {self.total_thumbnails}")
+            print(f"📊 Starting thumbnail generation...\n")
+
             thumbnail_dir = os.path.expanduser("~/.cache/video_organizer/thumbnails")
             os.makedirs(thumbnail_dir, exist_ok=True)
 
@@ -584,6 +602,8 @@ class MainWindow(QMainWindow):
                 worker.signals.progress.connect(self.on_thumbnail_progress)
 
                 self.thumbnail_pool.start(worker)
+        else:
+            print(f"\n✓ All {len(videos)} thumbnails are cached!\n")
 
     def on_thumbnail_progress(self, count):
         """Update progress when a thumbnail is generated"""
